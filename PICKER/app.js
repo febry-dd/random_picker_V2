@@ -5,8 +5,8 @@ let currentSpinCount = 0; // Jumlah putaran yang sudah dilakukan dalam sesi ini
 let totalSpins = 0; // Total putaran yang akan dilakukan dalam sesi ini
 let allWinners = []; // Array untuk menyimpan semua pemenang dalam sesi ini
 let selectedWinnerCount = 0; // Jumlah pemenang yang dipilih untuk sesi ini
-let voiceControlActive = false; // Status apakah kontrol suara aktif
-let recognition = null; // Objek speech recognition
+let selectedPrizeName = ""; // Nama hadiah yang sedang diundi
+const pendingWinnersBackupKey = "random_picker_pending_winners";
 let isWheelSpinning = false; // Status apakah roda sedang berputar
 let stopRequested = false; // Status apakah permintaan berhenti sudah dikirim
 let animationId = null; // ID untuk animation frame
@@ -26,7 +26,9 @@ function showWinnerModal(winner) {
   winnerModalOpen = true; // ✅ KUNCI MODAL
 
   winnerName.classList.remove("multiple-winners");
-  winnerName.textContent = winner;
+  winnerName.innerHTML = selectedPrizeName
+    ? `<div class="winner-prize">${escapeHtml(selectedPrizeName)}</div><div>${escapeHtml(winner)}</div>`
+    : escapeHtml(winner);
   modal.classList.add("show");
 
   setTimeout(() => playWinSound(), 300);
@@ -46,7 +48,7 @@ let wheelCache = {
 // ============================================
 const canvas = document.getElementById("wheel"); // Canvas untuk roda
 const ctx = canvas.getContext("2d"); // Context 2D untuk menggambar
-const colors = ["#ef5350", "#4caf50", "#ffeb3b", "#2196F3", "#9c27b0"]; // Warna segment roda
+const colors = ["#20c997", "#ffca3a", "#ff5d5d", "#4dabf7", "#8b5cf6", "#ff8a3d"]; // Warna segment roda
 
 // Offscreen canvas untuk double buffering (mencegah flicker)
 let offscreenCanvas = document.createElement("canvas");
@@ -56,12 +58,6 @@ let offscreenCtx = offscreenCanvas.getContext("2d");
 // FUNGSI BANTUAN UMUM
 // ============================================
 
-/**
- * Fungsi untuk mendeteksi perintah "START" dari transcript suara
- * Mencakup variasi kata yang sering salah dikenali oleh speech recognition
- * @param {string} transcript - Teks hasil pengenalan suara
- * @returns {boolean} - True jika terdeteksi sebagai perintah START
- */
 let seedString = null;
 let seedNumber = null;
 let seededRandom = null;
@@ -95,61 +91,6 @@ function initSeededRandom() {
   console.log("🔢 SEED NUMBER:", seedNumber);
 }
 
-function detectStartCommand(transcript) {
-  // Normalisasi transcript ke lowercase dan hapus spasi berlebih
-  const normalized = transcript.toLowerCase().trim();
-
-  console.log("🔍 Deteksi perintah dari transcript:", normalized);
-
-  // Daftar kata kunci yang dianggap sebagai "START" (termasuk variasi salah dikenali)
-  const startKeywords = [
-    "start", // Kata yang benar
-    "star", // Sering salah dikenali
-    "store", // Sering salah dikenali
-    "stard", // Variasi lain
-    "stor", // Singkatan
-    "starts", // Plural
-    "starr", // Double r
-    "sta", // Singkat
-    "st", // Sangat singkat
-    "starred", // Past tense
-  ];
-
-  // Cek exact match atau contains
-  for (const keyword of startKeywords) {
-    if (normalized === keyword || normalized.includes(keyword)) {
-      console.log(
-        `✅ Cocok dengan keyword: "${keyword}" dari transcript: "${normalized}"`
-      );
-
-      // Validasi tambahan: panjang kata harus wajar (3-7 karakter)
-      if (normalized.length >= 3 && normalized.length <= 7) {
-        return true;
-      }
-    }
-  }
-
-  // Cek pola regex untuk variasi kata "start" yang umum
-  const startPatterns = [
-    /^st[ao]r?t?$/i, // star, stor, start
-    /^st[ao]r[dt]?$/i, // stard, stort
-    /^sta[r]?$/i, // sta, star
-    /^st[ao]re?$/i, // store, stor
-  ];
-
-  for (const pattern of startPatterns) {
-    if (pattern.test(normalized)) {
-      console.log(
-        `✅ Cocok dengan pola: ${pattern} dari transcript: "${normalized}"`
-      );
-      return true;
-    }
-  }
-
-  console.log(`❌ Tidak terdeteksi sebagai perintah START: "${normalized}"`);
-  return false;
-}
-
 /**
  * Escape HTML untuk mencegah XSS (Cross-Site Scripting)
  * @param {string} text - Teks yang akan di-escape
@@ -159,6 +100,74 @@ function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+function getResultLabel(winner, prizeName = selectedPrizeName) {
+  return prizeName ? `${winner} - ${prizeName}` : winner;
+}
+
+function savePendingWinnersBackup(winners) {
+  try {
+    const prizeName = selectedPrizeName;
+    const payload = {
+      prizeName,
+      winners,
+      labels: winners.map((winner) => getResultLabel(winner, prizeName)),
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(pendingWinnersBackupKey, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("Gagal membuat pending backup di browser:", error);
+  }
+}
+
+function clearPendingWinnersBackup() {
+  try {
+    localStorage.removeItem(pendingWinnersBackupKey);
+  } catch (error) {
+    console.warn("Gagal menghapus pending backup di browser:", error);
+  }
+}
+
+async function recoverPendingWinnersBackup() {
+  let pending = null;
+  try {
+    const raw = localStorage.getItem(pendingWinnersBackupKey);
+    if (!raw) return;
+    pending = JSON.parse(raw);
+  } catch (error) {
+    clearPendingWinnersBackup();
+    return;
+  }
+
+  if (!pending || !Array.isArray(pending.winners) || pending.winners.length === 0) {
+    clearPendingWinnersBackup();
+    return;
+  }
+
+  console.log("🔁 Memulihkan pending winner backup:", pending);
+  let lastResponse = null;
+  for (let i = 0; i < pending.winners.length; i++) {
+    const winner = pending.winners[i];
+    const label = pending.labels?.[i] || getResultLabel(winner, pending.prizeName || "");
+    lastResponse = await addResultToServer(winner, false, label);
+  }
+
+  if (lastResponse) {
+    updateResultsList(lastResponse.results);
+    if (lastResponse.entries) {
+      entries = lastResponse.entries;
+      availableEntries = [...lastResponse.entries];
+      updateEntriesList(lastResponse.entries);
+      if (availableEntries.length > 0) {
+        drawWheel(0);
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+    clearPendingWinnersBackup();
+    updateManualStatus("✅ Backup hasil terakhir sudah dipulihkan", "#4caf50");
+  }
 }
 
 // ============================================
@@ -305,18 +314,10 @@ function setupAudioUnlocker() {
   });
 
   // Juga unlock saat tombol spin diklik
-  const spinButtons = document.querySelectorAll(
-    ".winner-count-btn, .btn-primary, #btn-custom"
-  );
+  const spinButtons = document.querySelectorAll(".winner-count-btn, .btn-start, .btn-stop");
   spinButtons.forEach((button) => {
     button.addEventListener("click", unlockAudio, { once: true });
   });
-
-  // Unlock saat input difokus
-  const customInput = document.getElementById("customWinnerCount");
-  if (customInput) {
-    customInput.addEventListener("focus", unlockAudio, { once: true });
-  }
 }
 
 /**
@@ -669,11 +670,7 @@ function startNextSpin() {
   console.log(`Memulai putaran ${currentSpinCount} dari ${totalSpins}`);
 
   updateSpinCounter(); // Update UI counter
-  updateVoiceIndicator(
-    "🔄 Berputar...",
-    'Ucapkan "STOP" untuk menghentikan',
-    "spinning"
-  );
+  updateManualStatus("🔄 Roda sedang berputar... Tekan STOP untuk menghentikan", "#4caf50");
 
   // Reset state animasi
   isWheelSpinning = true;
@@ -807,96 +804,6 @@ function startDeceleration() {
 }
 
 // ============================================
-// SPEECH RECOGNITION (KONTROL SUARA)
-// ============================================
-
-/**
- * Inisialisasi sistem speech recognition
- */
-function initializeSpeechRecognition() {
-  // Cek browser support
-  if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SpeechRecognition();
-
-    // Konfigurasi recognition
-    recognition.continuous = true; // Terus mendengarkan
-    recognition.interimResults = true; // Hasil sementara
-    recognition.lang = "id-ID"; // Bahasa Indonesia
-
-    /**
-     * Event handler saat ada hasil pengenalan suara
-     * @param {SpeechRecognitionEvent} event - Event dari speech recognition
-     */
-    recognition.onresult = (event) => {
-      const last = event.results.length - 1;
-      const transcript = event.results[last][0].transcript.trim();
-
-      // LOG TRANSCRIPT KE CONSOLE untuk debugging
-      console.log("🎤 Suara terdeteksi:", transcript);
-      console.log("Kontrol suara aktif:", voiceControlActive);
-      console.log("Roda sedang berputar:", isWheelSpinning);
-
-      // Jika kontrol suara aktif dan roda tidak berputar
-      if (voiceControlActive && !isWheelSpinning) {
-        // Gunakan fungsi deteksi yang lebih baik untuk perintah START
-        if (detectStartCommand(transcript)) {
-          console.log("✅ Perintah START terdeteksi!");
-          handleStartCommand();
-        }
-      }
-      // Jika roda sedang berputar, cek perintah STOP
-      else if (isWheelSpinning && transcript.toLowerCase().includes("stop")) {
-        console.log("🛑 Perintah STOP terdeteksi! Menghentikan roda...");
-        handleStopCommand();
-      }
-    };
-
-    // Event handler saat recognition dimulai
-    recognition.onstart = () => {
-      console.log("✅ Speech recognition berhasil dimulai!");
-      updateVoiceIndicator(
-        "🎤 Mendengarkan...",
-        'Ucapkan "START" untuk memulai atau "STOP" untuk menghentikan',
-        "listening"
-      );
-    };
-
-    // Event handler saat ada error
-    recognition.onerror = (event) => {
-      console.log("❌ Error speech recognition:", event.error);
-
-      // Jika tidak ada suara yang terdeteksi, restart recognition
-      if (event.error === "no-speech" && voiceControlActive) {
-        console.log("Tidak ada suara terdeteksi, merestart...");
-        recognition.stop();
-        setTimeout(() => {
-          console.log("Merestart recognition...");
-          recognition.start();
-        }, 100);
-      }
-    };
-
-    // Event handler saat recognition berakhir
-    recognition.onend = () => {
-      console.log("Speech recognition berakhir");
-
-      // Jika kontrol suara masih aktif, restart recognition
-      if (voiceControlActive) {
-        console.log("Kontrol suara masih aktif, merestart recognition...");
-        recognition.start();
-      }
-    };
-  } else {
-    console.log("❌ Speech recognition tidak didukung di browser ini");
-    alert(
-      "Browser Anda tidak mendukung voice recognition. Gunakan Chrome atau Edge."
-    );
-  }
-}
-
-// ============================================
 // FUNGSI UI (USER INTERFACE)
 // ============================================
 
@@ -913,81 +820,21 @@ function updateSpinCounter() {
 }
 
 /**
- * Update indikator suara di UI
- * @param {string} status - Status saat ini
- * @param {string} command - Perintah yang tersedia
- * @param {string} state - State tambahan untuk styling
- */
-function updateVoiceIndicator(status, command, state = "") {
-  const indicator = document.getElementById("voiceIndicator");
-  const statusEl = document.getElementById("voiceStatus");
-  const commandEl = document.getElementById("voiceCommand");
-
-  statusEl.textContent = status;
-  commandEl.textContent = command;
-
-  // Reset class dan tambahkan state jika ada
-  indicator.className = "voice-indicator";
-  if (state) indicator.classList.add(state);
-
-  // Log perubahan status
-  console.log(`Voice indicator diupdate: ${status} - ${command}`);
-}
-
-/**
  * Enable/disable tombol-tombol di UI selama roda berputar
  * @param {boolean} disable - True untuk disable, false untuk enable
  */
 function disableButtons(disable) {
-  // Tombol jumlah pemenang cepat (1, 2, 3, 5, 10, 20)
-  [1, 2, 3, 5, 10, 20].forEach((count) => {
-    const btn = document.getElementById(`btn-${count}`);
-    if (btn) btn.disabled = disable;
+  // Tombol hadiah cepat
+  document.querySelectorAll(".winner-count-btn").forEach((btn) => {
+    btn.disabled = disable;
   });
-
-  // Input custom dan tombolnya
-  const customInput = document.getElementById("customWinnerCount");
-  const customBtn = document.getElementById("btn-custom");
-  if (customInput) customInput.disabled = disable;
-  if (customBtn) customBtn.disabled = disable;
 }
 
-/**
- * Handler untuk perintah START dari suara
- */
-function handleStartCommand() {
-  console.log("handleStartCommand dipanggil");
-  console.log("Kontrol suara aktif:", voiceControlActive);
-  console.log("Roda sedang berputar:", isWheelSpinning);
-  console.log("Putaran saat ini:", currentSpinCount);
-
-  // Validasi kondisi sebelum memulai
-  if (!voiceControlActive) {
-    console.log("Kontrol suara tidak aktif, diabaikan");
-    return;
-  }
-
-  if (isWheelSpinning) {
-    console.log("Roda sudah berputar, diabaikan");
-    return;
-  }
-
-  if (currentSpinCount >= totalSpins) {
-    console.log("Semua putaran sudah selesai, diabaikan");
-    return;
-  }
-
-  console.log("Memulai putaran berikutnya via perintah suara");
-  startNextSpin();
-}
-
-/**
- * Handler untuk perintah STOP dari suara
- */
-function handleStopCommand() {
-  if (!isWheelSpinning || isDecelerating) return;
-  stopRequested = true;
-  startDeceleration();
+function updateManualStatus(message, color = "") {
+  const manualStatus = document.getElementById("manualStatus");
+  if (!manualStatus) return;
+  manualStatus.textContent = message;
+  if (color) manualStatus.style.color = color;
 }
 
 // ============================================
@@ -1001,6 +848,7 @@ function handleStopCommand() {
 async function selectWinner() {
   const winners = pickWinnersFair(selectedWinnerCount);
   allWinners = [...winners];
+  savePendingWinnersBackup(winners);
 
   // Hapus pemenang dari peserta
   winners.forEach(winner => {
@@ -1010,31 +858,38 @@ async function selectWinner() {
     }
   });
 
-  // Tampilkan modal
-  if (winners.length > 1) {
-    showMultipleWinnersModal(winners);
-  } else {
-    showWinnerModal(winners[0]);
-  }
-
   // Kirim ke server secara sequential untuk menghindari race condition
   console.log(`📤 Mengirim ${winners.length} pemenang ke server secara sequential...`);
   let lastResponse = null;
   for (const winner of winners) {
-    lastResponse = await addResultToServer(winner, false); // updateUI = false untuk menghindari flicker
+    const resultLabel = getResultLabel(winner);
+    lastResponse = await addResultToServer(winner, false, resultLabel); // updateUI = false untuk menghindari flicker
   }
-  
+
   // Update UI hanya sekali setelah semua pemenang dikirim
   if (lastResponse) {
+    clearPendingWinnersBackup();
     updateResultsList(lastResponse.results);
     if (lastResponse.entries) {
       entries = lastResponse.entries;
       availableEntries = [...lastResponse.entries];
       updateEntriesList(lastResponse.entries);
     }
+  } else {
+    console.warn("Hasil belum tersimpan ke server. Pending backup browser tetap disimpan.");
+    alert("Hasil sudah dipilih, tetapi belum berhasil disimpan ke backup server. Jangan tutup halaman jika memungkinkan; sistem akan mencoba memulihkan saat halaman dibuka lagi.");
   }
-  console.log(`✅ Semua ${winners.length} pemenang berhasil dikirim ke server`);
-  
+
+  // Tampilkan modal setelah data berhasil dikirim atau pending backup browser dibuat
+  if (winners.length > 1) {
+    showMultipleWinnersModal(winners);
+  } else {
+    showWinnerModal(winners[0]);
+  }
+  if (lastResponse) {
+    console.log(`✅ Semua ${winners.length} pemenang berhasil dikirim ke server`);
+  }
+
 }
 
 function closeWinnerManually() {
@@ -1050,12 +905,7 @@ function closeWinnerManually() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 
-  // Akhiri sesi voice / spin atau kontrol manual
-  if (manualControlActive) {
-    finishManualControl();
-  } else {
-    finishVoiceSession();
-  }
+  finishManualControl();
 }
 
 function closeModal() {
@@ -1078,151 +928,54 @@ function closeModal() {
 // ============================================
 
 /**
- * Memulai putaran dengan jumlah pemenang custom
+ * Memulai undian berdasarkan hadiah yang dipilih.
+ * @param {string} prizeName - Nama hadiah
+ * @param {number} count - Jumlah pemenang untuk hadiah tersebut
  */
-function startCustomSpin() {
-  const input = document.getElementById("customWinnerCount");
-  const count = parseInt(input.value);
-
-  // Validasi input
-  if (!count || count < 1) {
-    alert("Masukkan jumlah pemenang yang valid (minimal 1)");
-    input.focus();
-    return;
-  }
-
-  if (count > availableEntries.length) {
-    alert(
-      `Jumlah pemenang tidak boleh lebih dari ${availableEntries.length} (peserta tersisa)`
-    );
-    input.value = availableEntries.length;
-    input.focus();
-    return;
-  }
-
-  // Inisialisasi seeded random SEBELUM memulai spin
-  initSeededRandom();
-  
-  // Mulai putaran dengan jumlah custom
-  startMultipleSpin(count);
-  input.value = ""; // Reset input
+function startPrizeSpin(prizeName, count) {
+  selectedPrizeName = prizeName;
+  startMultipleSpin(count, prizeName);
 }
 
 /**
- * Memulai sesi multiple spins dengan kontrol suara
+ * Menyiapkan sesi undian berdasarkan hadiah.
  * @param {number} count - Jumlah pemenang yang akan dipilih
+ * @param {string} prizeName - Nama hadiah yang sedang diundi
  */
-async function startMultipleSpin(count) {
+function startMultipleSpin(count, prizeName = "") {
   console.log(`startMultipleSpin dipanggil dengan count: ${count}`);
-
-  // Inisialisasi seeded random untuk memastikan acakan konsisten
-  initSeededRandom();
+  selectedPrizeName = prizeName || selectedPrizeName || "";
 
   // Validasi kondisi
   if (isSpinning) {
     console.log("Sudah dalam proses putaran, permintaan diabaikan");
+    updateManualStatus("Sesi masih aktif. Tutup modal pemenang dulu sebelum memilih hadiah berikutnya.", "#ffc107");
     return;
   }
-
   if (availableEntries.length === 0) {
+    selectedPrizeName = "";
     console.log("Tidak ada peserta tersedia");
     alert("Tidak ada peserta tersisa!");
-    return;
-  }
-
-  if (!recognition) {
-    console.log("Speech recognition tidak tersedia");
-    alert(
-      "Browser Anda tidak mendukung voice recognition. Gunakan Chrome atau Edge."
-    );
     return;
   }
 
   // Hitung jumlah aktual (tidak boleh lebih dari peserta tersedia)
   const actualCount = Math.min(count, availableEntries.length);
 
-  // Setup state untuk sesi baru
-  // PENTING: totalSpins SELALU 1 karena semua pemenang diambil dalam 1x spin
+  // Setup state untuk sesi baru. Total spin tetap 1 karena semua pemenang diambil dalam 1x spin.
   totalSpins = 1;
   currentSpinCount = 0;
   allWinners = [];
   selectedWinnerCount = actualCount;
-  voiceControlActive = true;
-  isSpinning = true;
-
-  disableButtons(true); // Nonaktifkan tombol selama sesi
 
   prepareWheelCache(); // Siapkan cache untuk performa
 
-  console.log(`Memulai ${actualCount} putaran dengan kontrol suara`);
+  console.log(`Menyiapkan undian ${actualCount} pemenang`);
+  console.log(`Hadiah: ${selectedPrizeName || "-"}`);
   console.log(`Peserta tersedia: ${availableEntries.length}`);
-
-  // Update UI untuk mode kontrol suara
-  updateVoiceIndicator(
-    "🎤 Mendengarkan...",
-    'Ucapkan "START" untuk memulai atau "STOP" untuk menghentikan',
-    "listening"
-  );
-
-  // Mulai speech recognition
-  try {
-    console.log("Memulai speech recognition...");
-    recognition.start();
-  } catch (e) {
-    console.log("Error saat memulai recognition:", e);
-  }
-}
-
-/**
- * Menyelesaikan sesi kontrol suara
- */
-function finishVoiceSession() {
-  console.log("Menyelesaikan sesi suara");
-
-  // Reset semua state
-  voiceControlActive = false;
-  isSpinning = false;
-  totalSpins = 0;
-  currentSpinCount = 0;
-  selectedWinnerCount = 0;
-
-  // Hentikan animation frame jika masih berjalan
-  if (animationId) {
-    console.log("Membatalkan animation frame");
-    cancelAnimationFrame(animationId);
-    animationId = null;
-  }
-
-  // Pastikan suara berhenti
-  stopWheelSound();
-
-  // Hentikan speech recognition
-  if (recognition) recognition.stop();
-
-  // Update UI untuk status selesai
-  updateVoiceIndicator("✅ Selesai!", "Semua pemenang telah terpilih", "");
-
-  // Kembalikan ke status default setelah delay
-  setTimeout(() => {
-    updateVoiceIndicator(
-      "Siap Mendengar",
-      'Pilih jumlah pemenang, lalu ucapkan "START"',
-      ""
-    );
-  }, 3000);
-
-  // Update UI lainnya
   updateSpinCounter();
-  disableButtons(false); // Aktifkan kembali tombol
-
-  console.log("Sesi suara selesai");
+  updateManualStatus(`${selectedPrizeName} siap diundi (${actualCount} pemenang). Tekan START.`, "#4caf50");
 }
-
-/**
- * Batalkan sesi kontrol suara tanpa menandakan sesi selesai (dipakai untuk error/izin)
- * @param {string} reason - Alasan pembatalan untuk logging/UI
- */
-
 
 // ============================================
 // KOMUNIKASI DENGAN SERVER (PHP)
@@ -1234,11 +987,12 @@ function finishVoiceSession() {
  * @param {boolean} updateUI - Apakah harus update UI (default true)
  * @returns {Promise<Object>} - Response data dari server
  */
-async function addResultToServer(winner, updateUI = false) {
+async function addResultToServer(winner, updateUI = false, resultLabel = "") {
   try {
     const formData = new FormData();
     formData.append("action", "add_result");
     formData.append("winner", winner);
+    if (resultLabel) formData.append("result_label", resultLabel);
 
     // Kirim request ke server
     const response = await fetch("", {
@@ -1275,6 +1029,7 @@ async function addResultToServer(winner, updateUI = false) {
 function updateEntriesList(entriesList) {
   const entriesContainer = document.querySelector("#entries-tab .entry-list");
   const entriesBadge = document.getElementById("entriesBadge");
+  const entriesStat = document.getElementById("entriesStat");
 
   if (!entriesContainer) return;
 
@@ -1308,10 +1063,7 @@ function updateEntriesList(entriesList) {
 
   // Update badge counter
   entriesBadge.textContent = entriesList.length;
-
-  // Update max value untuk input custom
-  const customInput = document.getElementById("customWinnerCount");
-  if (customInput) customInput.max = entriesList.length;
+  if (entriesStat) entriesStat.textContent = entriesList.length;
 
   // Persiapkan cache roda dengan data baru
   prepareWheelCache();
@@ -1324,6 +1076,7 @@ function updateEntriesList(entriesList) {
 function updateResultsList(results) {
   const resultsList = document.getElementById("resultsList");
   const resultsBadge = document.getElementById("resultsBadge");
+  const resultsStat = document.getElementById("resultsStat");
 
   resultsList.innerHTML = "";
 
@@ -1336,6 +1089,7 @@ function updateResultsList(results) {
   });
 
   resultsBadge.textContent = results.length;
+  if (resultsStat) resultsStat.textContent = results.length;
 }
 
 // ============================================
@@ -1432,7 +1186,10 @@ function getAdditionalWinners(count) {
 function showMultipleWinnersModal(winners) {
   const modal = document.getElementById("winnerModal");
   const winnerName = document.getElementById("winnerName");
-  
+  const prizeTitle = selectedPrizeName
+    ? `${escapeHtml(selectedPrizeName)} (${winners.length} pemenang)`
+    : `Pemenang (${winners.length})`;
+
   console.log(`🎉 Menampilkan modal multiple pemenang: ${winners.join(", ")}`);
   
   winnerName.classList.add("multiple-winners");
@@ -1458,7 +1215,7 @@ function showMultipleWinnersModal(winners) {
       .join("");
     
     winnerName.innerHTML = `<div style="text-align: center;">
-      <div style="font-size: 0.95em; margin-bottom: 10px; color: #ffc107; font-weight: bold;">📋 Pemenang (${winners.length}):</div>
+      <div class="winner-prize">📋 ${prizeTitle}</div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; font-size: 0.85em;">
         <div style="text-align: left;">
           ${leftHTML}
@@ -1477,7 +1234,7 @@ function showMultipleWinnersModal(winners) {
       .join("");
     
     winnerName.innerHTML = `<div style="text-align: center;">
-      <div style="font-size: 0.95em; margin-bottom: 10px; color: #ffc107; font-weight: bold;">📋 Pemenang (${winners.length}):</div>
+      <div class="winner-prize">📋 ${prizeTitle}</div>
       <div style="text-align: left; font-size: 0.85em;">
         ${winnersHTML}
       </div>
@@ -1674,26 +1431,14 @@ let manualWinnerCount = 0; // Jumlah pemenang untuk mode manual
  */
 function manualStartSpin() {
   console.log("manualStartSpin clicked", { manualControlActive, isWheelSpinning });
-  const manualControl = document.getElementById("manualControl");
-  const customInput = document.getElementById("customWinnerCount");
   const manualStatus = document.getElementById("manualStatus");
 
   // Jika tombol manual belum diminta input, minta sekarang
   if (!manualControlActive) {
-    // Ambil nilai dari input jika ada
-    const raw = (customInput && customInput.value) ? customInput.value.trim() : "";
-    // Jika user sebelumnya memilih tombol cepat (startMultipleSpin) maka gunakan selectedWinnerCount
-    let count = 0;
-    if (raw) {
-      count = parseInt(raw);
-    } else if (selectedWinnerCount && selectedWinnerCount > 0) {
-      count = selectedWinnerCount;
-    } else {
-      count = 1; // fallback minimal
-    }
+    const count = selectedWinnerCount && selectedWinnerCount > 0 ? selectedWinnerCount : 0;
 
     if (!count || count < 1) {
-      manualStatus.textContent = "❌ Masukkan jumlah pemenang yang valid!";
+      manualStatus.textContent = "❌ Pilih hadiah terlebih dahulu!";
       manualStatus.style.color = "#ff6b6b";
       return;
     }
@@ -1704,12 +1449,6 @@ function manualStartSpin() {
       return;
     }
 
-    // Non-aktifkan voice control jika aktif untuk menghindari konflik
-    if (voiceControlActive) {
-      voiceControlActive = false;
-      try { if (recognition) recognition.stop(); } catch (e) {}
-    }
-
     // Set mode manual aktif
     manualControlActive = true;
     manualWinnerCount = count;
@@ -1717,6 +1456,8 @@ function manualStartSpin() {
     totalSpins = 1;
     currentSpinCount = 0;
     allWinners = [];
+    isSpinning = true;
+    disableButtons(true);
 
     // Update UI
     manualStatus.textContent = "⏳ Roda sedang berputar... Tekan STOP untuk menghentikan";
@@ -1755,17 +1496,24 @@ function manualStopSpin() {
 function finishManualControl() {
   manualControlActive = false;
   manualWinnerCount = 0;
-  
-  const manualControl = document.getElementById("manualControl");
+  isSpinning = false;
+  isWheelSpinning = false;
+  isDecelerating = false;
+  stopRequested = false;
+  totalSpins = 0;
+  currentSpinCount = 0;
+  selectedWinnerCount = 0;
+  selectedPrizeName = "";
+
   const manualStatus = document.getElementById("manualStatus");
-  const customInput = document.getElementById("customWinnerCount");
-  
+
   // Reset UI
   document.getElementById("btn-manual-start").disabled = false;
   document.getElementById("btn-manual-stop").disabled = true;
-  manualStatus.textContent = "✅ Selesai! Tekan START untuk putaran baru";
+  manualStatus.textContent = "✅ Selesai! Pilih hadiah berikutnya";
   manualStatus.style.color = "#4caf50";
-  customInput.value = "";
+  updateSpinCounter();
+  disableButtons(false);
 }
 
 // ============================================
@@ -1773,7 +1521,6 @@ function finishManualControl() {
 // ============================================
 
 // Inisialisasi sistem saat halaman dimuat
-initializeSpeechRecognition(); // Sistem pengenalan suara
 initializeWheelSound(); // Sistem audio
 prepareWheelCache(); // Cache untuk roda
 
@@ -1784,28 +1531,15 @@ if (availableEntries.length > 500) {
   drawWheel(0); // Versi normal
 }
 
+recoverPendingWinnersBackup().catch((error) => {
+  console.warn("Gagal memulihkan pending winner backup:", error);
+});
+
 // ============================================
 // EVENT LISTENERS
 // ============================================
-
-// Event listener untuk input jumlah pemenang custom (Enter key)
-document
-  .getElementById("customWinnerCount")
-  ?.addEventListener("keypress", function (e) {
-    if (e.key === "Enter") startCustomSpin();
-  });
 
 // Event listener untuk upload Excel
 document
   .getElementById("excelUpload")
   ?.addEventListener("change", handleExcelUpload);
-
-// Event listener untuk menampilkan/menyembunyikan kontrol manual
-document
-  .getElementById("customWinnerCount")
-  ?.addEventListener("focus", function () {
-    const manualControl = document.getElementById("manualControl");
-    if (manualControl && availableEntries.length > 0) {
-      manualControl.style.display = "block";
-    }
-  });

@@ -1,21 +1,86 @@
 <?php
 session_start();
 
-// Initialize entries and results
-if (!isset($_SESSION['entries'])) {
-    $_SESSION['entries'] = ['Hanna', 'Charles', 'Eric', 'Fatima', 'Gabriel'];
+$defaultEntries = ['Hanna', 'Charles', 'Eric', 'Fatima', 'Gabriel'];
+$backupDir = __DIR__ . DIRECTORY_SEPARATOR . 'data';
+$backupFile = $backupDir . DIRECTORY_SEPARATOR . 'picker_backup.json';
+
+function normalizeList($items)
+{
+    if (!is_array($items)) {
+        return [];
+    }
+
+    $clean = [];
+    foreach ($items as $item) {
+        $value = trim((string) $item);
+        if ($value !== '') {
+            $clean[] = $value;
+        }
+    }
+    return $clean;
 }
-if (!isset($_SESSION['results'])) {
-    $_SESSION['results'] = [];
+
+function loadPickerBackup($backupFile)
+{
+    if (!is_file($backupFile)) {
+        return null;
+    }
+
+    $json = file_get_contents($backupFile);
+    if ($json === false || trim($json) === '') {
+        return null;
+    }
+
+    $data = json_decode($json, true);
+    if (!is_array($data)) {
+        return null;
+    }
+
+    return [
+        'entries' => normalizeList($data['entries'] ?? []),
+        'results' => normalizeList($data['results'] ?? []),
+    ];
+}
+
+function savePickerBackup($backupDir, $backupFile, $entries, $results)
+{
+    if (!is_dir($backupDir)) {
+        mkdir($backupDir, 0775, true);
+    }
+
+    $payload = [
+        'updated_at' => date('c'),
+        'entries' => array_values(normalizeList($entries)),
+        'results' => array_values(normalizeList($results)),
+    ];
+
+    return file_put_contents(
+        $backupFile,
+        json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+        LOCK_EX
+    ) !== false;
+}
+
+$backup = loadPickerBackup($backupFile);
+if ($backup !== null) {
+    $_SESSION['entries'] = $backup['entries'];
+    $_SESSION['results'] = $backup['results'];
+} else {
+    $_SESSION['entries'] = normalizeList($_SESSION['entries'] ?? $defaultEntries);
+    $_SESSION['results'] = normalizeList($_SESSION['results'] ?? []);
+    savePickerBackup($backupDir, $backupFile, $_SESSION['entries'], $_SESSION['results']);
 }
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['action'])) {
+        $stateChanged = false;
         switch ($_POST['action']) {
             case 'add_entry':
                 if (!empty($_POST['entry'])) {
                     $_SESSION['entries'][] = trim($_POST['entry']);
+                    $stateChanged = true;
                 }
                 break;
             case 'add_multiple_entries':
@@ -26,11 +91,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $_SESSION['entries'][] = trim($entry);
                         }
                     }
+                    savePickerBackup($backupDir, $backupFile, $_SESSION['entries'], $_SESSION['results']);
                     header('Content-Type: application/json');
                     echo json_encode([
                         'success' => true,
                         'count' => count($_POST['entries']),
-                        'total' => count($_SESSION['entries'])
+                        'total' => count($_SESSION['entries']),
+                        'backup' => true
                     ]);
                     exit;
                 }
@@ -38,17 +105,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'remove_entry':
                 if (isset($_POST['index'])) {
                     array_splice($_SESSION['entries'], $_POST['index'], 1);
+                    $stateChanged = true;
                 }
                 break;
             case 'clear_entries':
                 $_SESSION['entries'] = [];
+                $stateChanged = true;
                 break;
             case 'clear_results':
                 $_SESSION['results'] = [];
+                $stateChanged = true;
                 break;
             case 'add_result':
                 if (!empty($_POST['winner'])) {
-                    $_SESSION['results'][] = $_POST['winner'];
+                    $resultLabel = !empty($_POST['result_label']) ? $_POST['result_label'] : $_POST['winner'];
+                    if (!in_array($resultLabel, $_SESSION['results'], true)) {
+                        $_SESSION['results'][] = $resultLabel;
+                    }
 
                     // Remove winner from entries
                     $winnerToRemove = $_POST['winner'];
@@ -56,22 +129,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($key !== false) {
                         array_splice($_SESSION['entries'], $key, 1);
                     }
+                    $stateChanged = true;
                 }
+                savePickerBackup($backupDir, $backupFile, $_SESSION['entries'], $_SESSION['results']);
                 header('Content-Type: application/json');
                 echo json_encode([
                     'success' => true,
                     'results' => $_SESSION['results'],
-                    'entries' => $_SESSION['entries']
+                    'entries' => $_SESSION['entries'],
+                    'backup' => true
                 ]);
                 exit;
+        }
+        if ($stateChanged) {
+            savePickerBackup($backupDir, $backupFile, $_SESSION['entries'], $_SESSION['results']);
         }
     }
     header('Location: ' . $_SERVER['PHP_SELF']);
     exit;
 }
-
 $entries = $_SESSION['entries'];
 $results = $_SESSION['results'];
+$prizes = [
+    ['name' => 'Sepeda Listrik', 'count' => 2],
+    ['name' => 'TV', 'count' => 1],
+    ['name' => 'Kulkas', 'count' => 1],
+    ['name' => 'Mesin Cuci', 'count' => 1],
+    ['name' => 'Dispenser', 'count' => 1],
+    ['name' => 'Emoney', 'count' => 5],
+    ['name' => 'Coffee Maker', 'count' => 1],
+    ['name' => 'Pulpen Parker', 'count' => 5],
+];
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -86,7 +174,22 @@ $results = $_SESSION['results'];
 <body>
     <div class="container">
         <div class="wheel-section">
-            <h1 style="font-size: 36px; margin-bottom: 20px;">🎡 SPIN WHEEL</h1>
+            <header class="app-header">
+                <div class="eyebrow">Random Picker</div>
+                <h1>SPIN WHEEL</h1>
+                <p>Putar roda, pilih pemenang, dan kelola peserta dalam satu layar.</p>
+            </header>
+
+            <div class="stats-strip" aria-label="Ringkasan data">
+                <div class="stat-pill">
+                    <span class="stat-value" id="entriesStat"><?= count($entries) ?></span>
+                    <span class="stat-label">Peserta</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="stat-value" id="resultsStat"><?= count($results) ?></span>
+                    <span class="stat-label">Pemenang</span>
+                </div>
+            </div>
 
             <div class="wheel-container">
                 <canvas id="wheel" width="600" height="600"></canvas>
@@ -96,15 +199,9 @@ $results = $_SESSION['results'];
 
             <div class="spin-counter" id="spinCounter"></div>
 
-            <div class="voice-indicator" id="voiceIndicator">
-                <div class="mic-icon">🎤</div>
-                <div class="voice-status" id="voiceStatus">Siap Mendengar</div>
-                <div class="voice-command" id="voiceCommand">Pilih jumlah pemenang, lalu ucapkan "START"</div>
-            </div>
-
             <!-- SKEMA 2: Manual Control Buttons -->
                 <div class="manual-control" id="manualControl">
-                <h3 style="margin-top: 30px; margin-bottom: 15px;">🎮 Kontrol Manual</h3>
+                <h3>Kontrol Manual</h3>
                 <div class="manual-buttons">
                     <button type="button" class="btn btn-start" onclick="manualStartSpin()" id="btn-manual-start">
                         ▶️ START
@@ -118,6 +215,13 @@ $results = $_SESSION['results'];
         </div>
 
         <div class="sidebar">
+            <div class="sidebar-header">
+                <div>
+                    <span class="eyebrow">Dashboard</span>
+                    <h2>Daftar Undian</h2>
+                </div>
+            </div>
+
             <div class="tabs">
                 <button class="tab active" onclick="switchTab('entries')">
                     Entries <span class="badge" id="entriesBadge"><?= count($entries) ?></span>
@@ -137,7 +241,7 @@ $results = $_SESSION['results'];
                 <!-- Upload Excel Button -->
                 <div class="upload-section">
                     <label for="excelUpload" class="btn btn-upload">
-                        📁 Upload Excel
+                        <span>📁</span> Upload Excel
                         <input type="file" id="excelUpload" accept=".xlsx,.xls" style="display: none;">
                     </label>
                 </div>
@@ -155,33 +259,26 @@ $results = $_SESSION['results'];
                     <?php endforeach; ?>
                 </div>
 
-                <h3 style="margin: 20px 0 10px;">Pilih Jumlah Pemenang:</h3>
+                <h3 class="section-title">Pilih Hadiah</h3>
 
-                <!-- Custom input for winner count -->
-                <div class="custom-winner-input">
-                    <input type="number" id="customWinnerCount" min="1" max="<?= count($entries) ?>"
-                        placeholder="Masukkan jumlah..." class="winner-input">
-                    <button type="button" class="btn btn-primary" onclick="startCustomSpin()" id="btn-custom">
-                        Mulai
-                    </button>
+                <div class="quick-label">
+                    daftar hadiah
                 </div>
 
-                <div style="text-align: center; margin: 15px 0; color: rgba(255,255,255,0.5);">
-                    atau pilih cepat:
-                </div>
-
-                <div class="winner-count-selector">
-                    <?php foreach ([1, 2, 3, 5, 10, 20] as $count): ?>
-                        <button type="button" class="winner-count-btn" onclick="startMultipleSpin(<?= $count ?>)"
-                            id="btn-<?= $count ?>">
-                            <?= $count ?> Pemenang
+                <div class="winner-count-selector prize-selector">
+                    <?php foreach ($prizes as $index => $prize): ?>
+                        <button type="button" class="winner-count-btn prize-btn"
+                            onclick="startPrizeSpin('<?= htmlspecialchars($prize['name'], ENT_QUOTES) ?>', <?= $prize['count'] ?>)"
+                            id="btn-prize-<?= $index ?>">
+                            <span class="prize-name"><?= htmlspecialchars($prize['name']) ?></span>
+                            <span class="prize-count"><?= $prize['count'] ?> Pemenang</span>
                         </button>
                     <?php endforeach; ?>
                 </div>
 
                 <form method="POST">
                     <input type="hidden" name="action" value="clear_entries">
-                    <button type="submit" class="btn btn-remove" style="width: 100%; margin-top: 10px; padding: 12px;">
+                    <button type="submit" class="btn btn-remove btn-block">
                         Hapus Semua Entries
                     </button>
                 </form>
@@ -198,7 +295,7 @@ $results = $_SESSION['results'];
 
                 <form method="POST">
                     <input type="hidden" name="action" value="clear_results">
-                    <button type="submit" class="btn btn-remove" style="width: 100%; margin-top: 10px; padding: 12px;">
+                    <button type="submit" class="btn btn-remove btn-block">
                         Hapus Semua Results
                     </button>
                 </form>
@@ -212,19 +309,10 @@ $results = $_SESSION['results'];
 
             <div class="winner-name" id="winnerName"></div>
 
-            <div style="text-align:center; margin-top:20px;">
-            <button
-                class="close-modal"
-                onclick="closeWinnerManually()"
-                style="
-                padding: 10px 25px;
-                font-size: 16px;
-                border-radius: 6px;
-                cursor: pointer;
-                "
-            >
-                ✅ Tutup
-            </button>
+            <div class="modal-actions">
+                <button class="close-modal" onclick="closeWinnerManually()">
+                    ✅ Tutup
+                </button>
             </div>
         </div>
         </div>
