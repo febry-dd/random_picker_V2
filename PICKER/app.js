@@ -106,6 +106,39 @@ function getResultLabel(winner, prizeName = selectedPrizeName) {
   return prizeName ? `${winner} - ${prizeName}` : winner;
 }
 
+function getAwardedPrizeNames(results) {
+  const awarded = new Set();
+
+  prizeNames.forEach((prizeName) => {
+    const suffix = ` - ${prizeName}`;
+    if (results.some((result) => String(result).endsWith(suffix))) {
+      awarded.add(prizeName);
+    }
+  });
+
+  return awarded;
+}
+
+function updatePrizeList(results) {
+  const prizeSelector = document.querySelector(".prize-selector");
+  if (!prizeSelector) return;
+
+  const awardedPrizes = getAwardedPrizeNames(results);
+  document.querySelectorAll(".prize-btn").forEach((button) => {
+    const prizeName = button.dataset.prizeName;
+    if (awardedPrizes.has(prizeName)) {
+      button.remove();
+    }
+  });
+
+  if (!prizeSelector.querySelector(".prize-btn") && !prizeSelector.querySelector(".prize-empty")) {
+    const empty = document.createElement("div");
+    empty.className = "prize-empty";
+    empty.textContent = "Semua hadiah sudah memiliki pemenang.";
+    prizeSelector.appendChild(empty);
+  }
+}
+
 function savePendingWinnersBackup(winners) {
   try {
     const prizeName = selectedPrizeName;
@@ -1090,6 +1123,7 @@ function updateResultsList(results) {
 
   resultsBadge.textContent = results.length;
   if (resultsStat) resultsStat.textContent = results.length;
+  updatePrizeList(results);
 }
 
 // ============================================

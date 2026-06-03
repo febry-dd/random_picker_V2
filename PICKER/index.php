@@ -62,6 +62,21 @@ function savePickerBackup($backupDir, $backupFile, $entries, $results)
     ) !== false;
 }
 
+function resultHasPrize($results, $prizeName)
+{
+    $suffix = ' - ' . $prizeName;
+    $suffixLength = strlen($suffix);
+
+    foreach ($results as $result) {
+        $result = (string) $result;
+        if ($suffixLength > 0 && substr($result, -$suffixLength) === $suffix) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 $backup = loadPickerBackup($backupFile);
 if ($backup !== null) {
     $_SESSION['entries'] = $backup['entries'];
@@ -150,7 +165,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 $entries = $_SESSION['entries'];
 $results = $_SESSION['results'];
-$prizes = [
+$allPrizes = [
     ['name' => 'Sepeda Listrik', 'count' => 2],
     ['name' => 'TV', 'count' => 1],
     ['name' => 'Kulkas', 'count' => 1],
@@ -160,6 +175,12 @@ $prizes = [
     ['name' => 'Coffee Maker', 'count' => 1],
     ['name' => 'Pulpen Parker', 'count' => 5],
 ];
+$prizes = [];
+foreach ($allPrizes as $prize) {
+    if (!resultHasPrize($results, $prize['name'])) {
+        $prizes[] = $prize;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -268,12 +289,16 @@ $prizes = [
                 <div class="winner-count-selector prize-selector">
                     <?php foreach ($prizes as $index => $prize): ?>
                         <button type="button" class="winner-count-btn prize-btn"
+                            data-prize-name="<?= htmlspecialchars($prize['name']) ?>"
                             onclick="startPrizeSpin('<?= htmlspecialchars($prize['name'], ENT_QUOTES) ?>', <?= $prize['count'] ?>)"
                             id="btn-prize-<?= $index ?>">
                             <span class="prize-name"><?= htmlspecialchars($prize['name']) ?></span>
                             <span class="prize-count"><?= $prize['count'] ?> Pemenang</span>
                         </button>
                     <?php endforeach; ?>
+                    <?php if (count($prizes) === 0): ?>
+                        <div class="prize-empty">Semua hadiah sudah memiliki pemenang.</div>
+                    <?php endif; ?>
                 </div>
 
                 <form method="POST">
@@ -333,6 +358,7 @@ $prizes = [
         // Pass PHP data to JavaScript
         const initialEntries = <?= json_encode($entries) ?>;
         const initialResults = <?= json_encode($results) ?>;
+        const prizeNames = <?= json_encode(array_column($allPrizes, 'name')) ?>;
     </script>
     <script src="xlsx.full.min.js"></script>
     <script src="app.js"></script>
