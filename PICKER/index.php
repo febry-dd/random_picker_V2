@@ -4,6 +4,16 @@ session_start();
 $defaultEntries = ['Hanna', 'Charles', 'Eric', 'Fatima', 'Gabriel'];
 $backupDir = __DIR__ . DIRECTORY_SEPARATOR . 'data';
 $backupFile = $backupDir . DIRECTORY_SEPARATOR . 'picker_backup.json';
+$allPrizes = [
+    ['name' => 'Sepeda Listrik', 'count' => 2],
+    ['name' => 'TV', 'count' => 1],
+    ['name' => 'Kulkas', 'count' => 1],
+    ['name' => 'Mesin Cuci', 'count' => 1],
+    ['name' => 'Dispenser', 'count' => 1],
+    ['name' => 'Emoney', 'count' => 5],
+    ['name' => 'Coffee Maker', 'count' => 1],
+    ['name' => 'Pulpen Parker', 'count' => 4],
+];
 
 function normalizeList($items)
 {
@@ -65,16 +75,43 @@ function savePickerBackup($backupDir, $backupFile, $entries, $results)
 function resultHasPrize($results, $prizeName)
 {
     $suffix = ' - ' . $prizeName;
-    $suffixLength = strlen($suffix);
 
     foreach ($results as $result) {
         $result = (string) $result;
-        if ($suffixLength > 0 && substr($result, -$suffixLength) === $suffix) {
+        if (strpos($result, $suffix) !== false) {
             return true;
         }
     }
 
     return false;
+}
+
+function extractPrizeFromResult($result, $allPrizes)
+{
+    $prizeNames = array_column($allPrizes, 'name');
+    usort($prizeNames, function ($a, $b) {
+        return strlen($b) <=> strlen($a);
+    });
+
+    foreach ($prizeNames as $prizeName) {
+        if (strpos((string) $result, ' - ' . $prizeName) !== false) {
+            return $prizeName;
+        }
+    }
+
+    return '';
+}
+
+function extractWinnerFromResult($result, $prizeName)
+{
+    $delimiter = ' - ' . $prizeName;
+    $position = strpos((string) $result, $delimiter);
+
+    if ($position === false) {
+        return trim((string) $result);
+    }
+
+    return trim(substr((string) $result, 0, $position));
 }
 
 $backup = loadPickerBackup($backupFile);
@@ -155,6 +192,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'backup' => true
                 ]);
                 exit;
+            case 'redraw_winner':
+                $index = isset($_POST['index']) ? (int) $_POST['index'] : -1;
+                if ($index < 0 || !isset($_SESSION['results'][$index])) {
+                    header('Content-Type: application/json');
+                    echo json_encode([
+                        'success' => false,
+                        'message' => 'Data pemenang tidak ditemukan.'
+                    ]);
+                    exit;
+                }
+
+                if (count($_SESSION['entries']) === 0) {
+                    header('Content-Type: application/json');
+                    echo json_encode([
+                        'success' => false,
+                        'message' => 'Tidak ada peserta tersisa untuk undian pengganti.'
+                    ]);
+                    exit;
+                }
+
+                $oldResult = $_SESSION['results'][$index];
+                if (strpos($oldResult, '[Tidak Hadir]') !== false) {
+                    header('Content-Type: application/json');
+                    echo json_encode([
+                        'success' => false,
+                        'message' => 'Pemenang ini sudah ditandai tidak hadir.'
+                    ]);
+                    exit;
+                }
+
+                $prizeName = extractPrizeFromResult($oldResult, $allPrizes);
+                if ($prizeName === '') {
+                    header('Content-Type: application/json');
+                    echo json_encode([
+                        'success' => false,
+                        'message' => 'Hadiah untuk pemenang ini tidak bisa dibaca.'
+                    ]);
+                    exit;
+                }
+
+                $absentWinner = extractWinnerFromResult($oldResult, $prizeName);
+                $replacementIndex = array_rand($_SESSION['entries']);
+                $replacementWinner = $_SESSION['entries'][$replacementIndex];
+                array_splice($_SESSION['entries'], $replacementIndex, 1);
+
+                $_SESSION['results'][$index] = $oldResult . ' [Tidak Hadir]';
+                $_SESSION['results'][] = $replacementWinner . ' - ' . $prizeName . ' [Pengganti ' . $absentWinner . ']';
+                savePickerBackup($backupDir, $backupFile, $_SESSION['entries'], $_SESSION['results']);
+
+                header('Content-Type: application/json');
+                echo json_encode([
+                    'success' => true,
+                    'results' => $_SESSION['results'],
+                    'entries' => $_SESSION['entries'],
+                    'winner' => $replacementWinner,
+                    'absent' => $absentWinner,
+                    'prize' => $prizeName,
+                    'backup' => true
+                ]);
+                exit;
         }
         if ($stateChanged) {
             savePickerBackup($backupDir, $backupFile, $_SESSION['entries'], $_SESSION['results']);
@@ -165,16 +262,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 $entries = $_SESSION['entries'];
 $results = $_SESSION['results'];
-$allPrizes = [
-    ['name' => 'Sepeda Listrik', 'count' => 2],
-    ['name' => 'TV', 'count' => 1],
-    ['name' => 'Kulkas', 'count' => 1],
-    ['name' => 'Mesin Cuci', 'count' => 1],
-    ['name' => 'Dispenser', 'count' => 1],
-    ['name' => 'Emoney', 'count' => 5],
-    ['name' => 'Coffee Maker', 'count' => 1],
-    ['name' => 'Pulpen Parker', 'count' => 5],
-];
 $prizes = [];
 foreach ($allPrizes as $prize) {
     if (!resultHasPrize($results, $prize['name'])) {

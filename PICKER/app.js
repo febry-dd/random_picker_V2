@@ -106,14 +106,27 @@ function getResultLabel(winner, prizeName = selectedPrizeName) {
   return prizeName ? `${winner} - ${prizeName}` : winner;
 }
 
+function parseResult(result) {
+  const text = String(result);
+  const sortedPrizeNames = [...prizeNames].sort((a, b) => b.length - a.length);
+  const prizeName = sortedPrizeNames.find((name) => text.includes(` - ${name}`)) || "";
+  const winnerName = prizeName ? text.split(` - ${prizeName}`)[0].trim() : text;
+
+  return {
+    text,
+    winnerName,
+    prizeName,
+    isAbsent: text.includes("[Tidak Hadir]"),
+    isReplacement: text.includes("[Pengganti "),
+  };
+}
+
 function getAwardedPrizeNames(results) {
   const awarded = new Set();
 
-  prizeNames.forEach((prizeName) => {
-    const suffix = ` - ${prizeName}`;
-    if (results.some((result) => String(result).endsWith(suffix))) {
-      awarded.add(prizeName);
-    }
+  results.forEach((result) => {
+    const parsed = parseResult(result);
+    if (parsed.prizeName) awarded.add(parsed.prizeName);
   });
 
   return awarded;
@@ -136,6 +149,58 @@ function updatePrizeList(results) {
     empty.className = "prize-empty";
     empty.textContent = "Semua hadiah sudah memiliki pemenang.";
     prizeSelector.appendChild(empty);
+  }
+}
+
+async function redrawWinner(resultIndex) {
+  const result = initialResults[resultIndex] || "";
+  const parsed = parseResult(result);
+  const confirmMessage = parsed.winnerName
+    ? `Tandai ${parsed.winnerName} tidak hadir dan undi 1 pengganti untuk ${parsed.prizeName}?`
+    : "Tandai pemenang ini tidak hadir dan undi 1 pengganti?";
+
+  if (!confirm(confirmMessage)) return;
+
+  const formData = new FormData();
+  formData.append("action", "redraw_winner");
+  formData.append("index", resultIndex);
+
+  try {
+    updateManualStatus("Mengundi pemenang pengganti...", "#ffc107");
+    const response = await fetch("", {
+      method: "POST",
+      body: formData,
+    });
+    const data = await response.json();
+
+    if (!data.success) {
+      alert(data.message || "Gagal mengundi pemenang pengganti.");
+      updateManualStatus(data.message || "Gagal mengundi pemenang pengganti.", "#ff6b6b");
+      return;
+    }
+
+    initialResults.length = 0;
+    initialResults.push(...data.results);
+    updateResultsList(data.results);
+
+    if (data.entries) {
+      entries = data.entries;
+      availableEntries = [...data.entries];
+      updateEntriesList(data.entries);
+      if (availableEntries.length > 0) {
+        drawWheel(0);
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    selectedPrizeName = data.prize || "";
+    showWinnerModal(data.winner);
+    updateManualStatus(`✅ Pengganti ${data.absent} untuk ${data.prize}: ${data.winner}`, "#4caf50");
+  } catch (error) {
+    console.error("Gagal mengundi pengganti:", error);
+    alert("Gagal mengundi pemenang pengganti. Coba lagi.");
+    updateManualStatus("Gagal mengundi pemenang pengganti.", "#ff6b6b");
   }
 }
 
@@ -1111,13 +1176,28 @@ function updateResultsList(results) {
   const resultsBadge = document.getElementById("resultsBadge");
   const resultsStat = document.getElementById("resultsStat");
 
+  if (Array.isArray(initialResults) && results !== initialResults) {
+    initialResults.length = 0;
+    initialResults.push(...results);
+  }
+
   resultsList.innerHTML = "";
 
   // Buat elemen untuk setiap pemenang
   results.forEach((result, index) => {
+    const parsed = parseResult(result);
     const div = document.createElement("div");
-    div.className = "result-item";
-    div.textContent = `🏆 ${index + 1}. ${result}`;
+    div.className = `result-item${parsed.isAbsent ? " result-absent" : ""}${parsed.isReplacement ? " result-replacement" : ""}`;
+
+    const canRedraw = parsed.prizeName && !parsed.isAbsent && availableEntries.length > 0;
+    const redrawButton = canRedraw
+      ? `<button type="button" class="btn-redraw" onclick="redrawWinner(${index})">Tidak Hadir</button>`
+      : "";
+
+    div.innerHTML = `
+      <span class="result-text">🏆 ${index + 1}. ${escapeHtml(result)}</span>
+      ${redrawButton}
+    `;
     resultsList.appendChild(div);
   });
 
@@ -1564,6 +1644,8 @@ if (availableEntries.length > 500) {
 } else {
   drawWheel(0); // Versi normal
 }
+
+updateResultsList(initialResults);
 
 recoverPendingWinnersBackup().catch((error) => {
   console.warn("Gagal memulihkan pending winner backup:", error);
